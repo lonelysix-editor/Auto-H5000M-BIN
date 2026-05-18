@@ -18,22 +18,22 @@ on:
       enable_nikki:
         description: '启用 Nikki'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_upnp:
         description: '启用 UPnP'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_vlmcsd:
         description: '启用 VLMCSd'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_mosdns:
         description: '启用 MosDNS'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_dockerman:
         description: '启用 DockerMan'
@@ -43,7 +43,7 @@ on:
       enable_qmodem_next:
         description: '启用 QModem Next (新版)'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_qmodem:
         description: '启用 QModem (旧版)'
@@ -53,7 +53,7 @@ on:
       enable_mwan:
         description: '启用 MWAN (多WAN负载均衡)'
         required: false
-        default: false
+        default: true
         type: boolean
       enable_homeproxy:
         description: '启用 HomeProxy'
@@ -84,6 +84,7 @@ env:
   CONFIG_URL: https://raw.githubusercontent.com/padavanonly/immortalwrt-mt798x-6.6/refs/heads/mt798x-mt799x-6.6-mtwifi/defconfig/mt7987_mt7992.config
   SOURCE_DIR: immortalwrt
   TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   prepare:
@@ -106,20 +107,35 @@ jobs:
       - name: 设置环境变量
         id: set-env
         run: |
-          # 从 workflow_dispatch inputs 读取配置
-          echo "enable_adguardhome=${{ github.event.inputs.enable_adguardhome || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_openclash=${{ github.event.inputs.enable_openclash || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_nikki=${{ github.event.inputs.enable_nikki || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_upnp=${{ github.event.inputs.enable_upnp || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_vlmcsd=${{ github.event.inputs.enable_vlmcsd || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_mosdns=${{ github.event.inputs.enable_mosdns || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_dockerman=${{ github.event.inputs.enable_dockerman || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_qmodem_next=${{ github.event.inputs.enable_qmodem_next || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_qmodem=${{ github.event.inputs.enable_qmodem || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_mwan=${{ github.event.inputs.enable_mwan || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_homeproxy=${{ github.event.inputs.enable_homeproxy || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_adbyby_plus=${{ github.event.inputs.enable_adbyby_plus || 'false' }}" >> $GITHUB_OUTPUT
-          echo "enable_original_modem=${{ github.event.inputs.enable_original_modem || 'false' }}" >> $GITHUB_OUTPUT
+          # workflow_dispatch 使用界面输入；schedule 没有 inputs，使用这里的自动编译默认值。
+          set_feature_output() {
+            local name="$1"
+            local scheduled_default="$2"
+            local manual_value="$3"
+            local value="$scheduled_default"
+
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              value="$manual_value"
+            fi
+
+            [ -n "$value" ] || value="$scheduled_default"
+            echo "${name}=${value}" >> "$GITHUB_OUTPUT"
+            echo "${name}=${value}"
+          }
+
+          set_feature_output "enable_adguardhome" "false" "${{ github.event.inputs.enable_adguardhome }}"
+          set_feature_output "enable_openclash" "false" "${{ github.event.inputs.enable_openclash }}"
+          set_feature_output "enable_nikki" "true" "${{ github.event.inputs.enable_nikki }}"
+          set_feature_output "enable_upnp" "true" "${{ github.event.inputs.enable_upnp }}"
+          set_feature_output "enable_vlmcsd" "true" "${{ github.event.inputs.enable_vlmcsd }}"
+          set_feature_output "enable_mosdns" "true" "${{ github.event.inputs.enable_mosdns }}"
+          set_feature_output "enable_dockerman" "false" "${{ github.event.inputs.enable_dockerman }}"
+          set_feature_output "enable_qmodem_next" "true" "${{ github.event.inputs.enable_qmodem_next }}"
+          set_feature_output "enable_qmodem" "false" "${{ github.event.inputs.enable_qmodem }}"
+          set_feature_output "enable_mwan" "true" "${{ github.event.inputs.enable_mwan }}"
+          set_feature_output "enable_homeproxy" "false" "${{ github.event.inputs.enable_homeproxy }}"
+          set_feature_output "enable_adbyby_plus" "false" "${{ github.event.inputs.enable_adbyby_plus }}"
+          set_feature_output "enable_original_modem" "false" "${{ github.event.inputs.enable_original_modem }}"
 
       - name: 检出代码
         uses: actions/checkout@v4
@@ -317,9 +333,18 @@ jobs:
           if [ "${{ steps.set-env.outputs.enable_adbyby_plus }}" = "true" ]; then
             echo "🔧 安装 Adbyby Plus Lite..."
             if [ ! -d "package/luci-app-adbyby-plus" ]; then
+              rm -rf /tmp/adbyby-plus-lite
               git clone --depth=1 --recurse-submodules https://github.com/kongfl888/luci-app-adbyby-plus-lite.git /tmp/adbyby-plus-lite
+              if [ ! -d "/tmp/adbyby-plus-lite/luci-app-adbyby-plus" ]; then
+                echo "❌ Adbyby Plus Lite 仓库结构异常，未找到 luci-app-adbyby-plus 目录"
+                exit 1
+              fi
               cp -r /tmp/adbyby-plus-lite/luci-app-adbyby-plus package/luci-app-adbyby-plus
               rm -rf /tmp/adbyby-plus-lite
+            fi
+            if [ ! -f "package/luci-app-adbyby-plus/Makefile" ]; then
+              echo "❌ Adbyby Plus Lite 安装失败，package/luci-app-adbyby-plus/Makefile 不存在"
+              exit 1
             fi
             # 确保依赖包存在 (ipset 用于 Plus+ 模式)
             echo "CONFIG_PACKAGE_ipset=y" >> .config 2>/dev/null || true
@@ -429,6 +454,13 @@ jobs:
                 echo "CONFIG_PACKAGE_luci-app-adbyby-plus=y" >> .config
                 echo "CONFIG_PACKAGE_luci-i18n-adbyby-plus-zh-cn=y" >> .config
                 echo "CONFIG_PACKAGE_ipset=y" >> .config
+              elif [ "$pkg" = "dockerman" ]; then
+                echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
+                echo "CONFIG_PACKAGE_luci-lib-docker=y" >> .config
+                echo "CONFIG_PACKAGE_docker=y" >> .config
+                echo "CONFIG_PACKAGE_dockerd=y" >> .config
+                echo "CONFIG_PACKAGE_containerd=y" >> .config
+                echo "CONFIG_PACKAGE_runc=y" >> .config
               else
                 echo "CONFIG_PACKAGE_luci-app-$pkg=y" >> .config
               fi
@@ -438,6 +470,10 @@ jobs:
                 disabled_pkgs+=("nikki" "luci-app-nikki" "luci-i18n-nikki-zh-cn" "luci-i18n-nikki-en")
               elif [ "$pkg" = "adguardhome" ]; then
                 disabled_pkgs+=("luci-app-$pkg" "luci-i18n-$pkg-zh-cn")
+              elif [ "$pkg" = "adbyby-plus" ]; then
+                disabled_pkgs+=("luci-app-adbyby-plus" "luci-i18n-adbyby-plus-zh-cn")
+              elif [ "$pkg" = "dockerman" ]; then
+                disabled_pkgs+=("luci-app-dockerman" "luci-lib-docker")
               else
                 disabled_pkgs+=("luci-app-$pkg")
               fi
@@ -500,6 +536,27 @@ jobs:
 
           # 自动解析依赖
           make defconfig
+
+          verify_enabled_pkg() {
+            local feature_name="$1"
+            local config_name="$2"
+            local enabled="$3"
+            if [ "$enabled" = "true" ] && ! grep -q "^CONFIG_PACKAGE_${config_name}=y$" .config; then
+              echo "❌ ${feature_name} 已请求启用，但 CONFIG_PACKAGE_${config_name}=y 未在 defconfig 后生效"
+              grep -n "PACKAGE_${config_name}" .config || true
+              exit 1
+            fi
+          }
+
+          verify_enabled_pkg "Nikki" "luci-app-nikki" "${{ steps.set-env.outputs.enable_nikki }}"
+          verify_enabled_pkg "UPnP" "luci-app-upnp" "${{ steps.set-env.outputs.enable_upnp }}"
+          verify_enabled_pkg "VLMCSd" "luci-app-vlmcsd" "${{ steps.set-env.outputs.enable_vlmcsd }}"
+          verify_enabled_pkg "MosDNS" "luci-app-mosdns" "${{ steps.set-env.outputs.enable_mosdns }}"
+          verify_enabled_pkg "DockerMan" "luci-app-dockerman" "${{ steps.set-env.outputs.enable_dockerman }}"
+          verify_enabled_pkg "QModem Next" "luci-app-qmodem-next" "${{ steps.set-env.outputs.enable_qmodem_next }}"
+          verify_enabled_pkg "MWAN" "luci-app-mwan3" "${{ steps.set-env.outputs.enable_mwan }}"
+          verify_enabled_pkg "HomeProxy" "luci-app-homeproxy" "${{ steps.set-env.outputs.enable_homeproxy }}"
+          verify_enabled_pkg "Adbyby Plus" "luci-app-adbyby-plus" "${{ steps.set-env.outputs.enable_adbyby_plus }}"
 
           echo "✅ 配置完成"
 
@@ -725,6 +782,8 @@ jobs:
             - VLMCSd: ${{ needs.prepare.outputs.enable_vlmcsd }}
             - MosDNS: ${{ needs.prepare.outputs.enable_mosdns }}
             - DockerMan: ${{ needs.prepare.outputs.enable_dockerman }}
+            - QModem Next: ${{ needs.prepare.outputs.enable_qmodem_next }}
+            - QModem: ${{ needs.prepare.outputs.enable_qmodem }}
             - MWAN: ${{ needs.prepare.outputs.enable_mwan }}
             - HomeProxy: ${{ needs.prepare.outputs.enable_homeproxy }}
             - Adbyby Plus: ${{ needs.prepare.outputs.enable_adbyby_plus }}
