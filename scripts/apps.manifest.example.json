@@ -1,0 +1,40 @@
+{
+  "Apps": [
+    {
+      "Name": "Example cumulative update",
+      "Type": "Msu",
+      "Path": "D:\\OfflineApps\\windows-update.msu"
+    },
+    {
+      "Name": "Example driver or language cab",
+      "Type": "Cab",
+      "Path": "D:\\OfflineApps\\package.cab"
+    },
+    {
+      "Name": "Example provisioned appx",
+      "Type": "Appx",
+      "Path": "D:\\OfflineApps\\Vendor.App_1.0.0.0_x64.appx",
+      "DependencyPath": [
+        "D:\\OfflineApps\\Microsoft.VCLibs.x64.appx"
+      ]
+    },
+    {
+      "Name": "Example silent MSI",
+      "Type": "Msi",
+      "Path": "D:\\OfflineApps\\app.msi",
+      "Args": ""
+    },
+    {
+      "Name": "Example silent EXE",
+      "Type": "Exe",
+      "Path": "D:\\OfflineApps\\setup.exe",
+      "Args": "/quiet /norestart"
+    },
+    {
+      "Name": "Example file copy",
+      "Type": "Copy",
+      "Path": "D:\\OfflineApps\\ConfigFiles",
+      "Destination": "ProgramData\\ConfigFiles"
+    }
+  ]
+}

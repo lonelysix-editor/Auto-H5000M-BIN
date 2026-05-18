@@ -368,6 +368,12 @@ jobs:
           
           rm -rf package/feeds/packages/{exim,onionshare-cli,python-zope-event,python-zope-interface,python-gevent,python-twisted} 2>/dev/null || true
 
+          if [ "${{ steps.set-env.outputs.enable_vlmcsd }}" = "true" ]; then
+            echo "🔧 确保 VLMCSd 包已安装..."
+            ./scripts/feeds install -f vlmcsd || true
+            ./scripts/feeds install -f luci-app-vlmcsd || true
+          fi
+
           # Nikki feed publishes both mihomo-alpha and mihomo-meta as providers for the
           # virtual mihomo package. Their mutual CONFLICTS entries can produce a Kconfig
           # recursive dependency error, so keep the stable default provider only.
@@ -557,8 +563,49 @@ jobs:
             echo "# CONFIG_PACKAGE_${pkg} is not set" >> .config
           done
 
+          config_enable() {
+            local symbol="$1"
+            ./scripts/config --file .config -e "$symbol" 2>/dev/null || {
+              sed -i "/^CONFIG_${symbol}=/d; /^# CONFIG_${symbol} is not set/d" .config
+              echo "CONFIG_${symbol}=y" >> .config
+            }
+          }
+
+          config_disable() {
+            local symbol="$1"
+            ./scripts/config --file .config -d "$symbol" 2>/dev/null || {
+              sed -i "/^CONFIG_${symbol}=/d; /^# CONFIG_${symbol} is not set/d" .config
+              echo "# CONFIG_${symbol} is not set" >> .config
+            }
+          }
+
+          # 在统一禁用列表之后再次设置关键包，避免基础配置或禁用项的重复行覆盖请求。
+          if [ "${{ steps.set-env.outputs.enable_nikki }}" = "true" ]; then
+            config_disable PACKAGE_mihomo-alpha
+            config_enable PACKAGE_mihomo-meta
+            config_enable PACKAGE_nikki
+            config_enable PACKAGE_luci-app-nikki
+            config_enable PACKAGE_luci-i18n-nikki-zh-cn
+          fi
+
+          if [ "${{ steps.set-env.outputs.enable_vlmcsd }}" = "true" ]; then
+            config_enable PACKAGE_vlmcsd
+            config_enable PACKAGE_luci-app-vlmcsd
+          fi
+
           # 自动解析依赖
           make defconfig
+
+          if [ "${{ steps.set-env.outputs.enable_vlmcsd }}" = "true" ] && ! grep -q "^CONFIG_PACKAGE_luci-app-vlmcsd=y$" .config; then
+            echo "⚠️ VLMCSd 首次 defconfig 后未启用，重新安装 feed 包并重试..."
+            ./scripts/feeds install -f vlmcsd || true
+            ./scripts/feeds install -f luci-app-vlmcsd || true
+            config_enable PACKAGE_vlmcsd
+            config_enable PACKAGE_luci-app-vlmcsd
+            make defconfig
+            echo "🔎 VLMCSd 配置状态:"
+            grep -n "PACKAGE_.*vlmcsd" .config || true
+          fi
 
           verify_enabled_pkg() {
             local feature_name="$1"
