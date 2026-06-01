@@ -202,9 +202,7 @@ jobs:
           path: |
             ${{ env.SOURCE_DIR }}/dl
             ${{ env.SOURCE_DIR }}/staging_dir/host
-            ${{ env.SOURCE_DIR }}/staging_dir/toolchain-*
             ${{ env.SOURCE_DIR }}/build_dir/host
-            ${{ env.SOURCE_DIR }}/build_dir/toolchain-*
           key: ${{ runner.os }}-build-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default', 'h5000m.extra.config', 'patches/**', 'scripts/local-build.sh') }}
           restore-keys: |
             ${{ runner.os }}-build-${{ env.REPO_BRANCH }}-

@@ -518,9 +518,20 @@ prefetch_and_toolchain() {
     done
   fi
 
+  toolchain_cache_valid() {
+    compgen -G "staging_dir/toolchain-*/lib/ld-musl-*.so*" >/dev/null || \
+      compgen -G "staging_dir/toolchain-*/lib/ld-linux-*.so*" >/dev/null
+  }
+
   if ! is_true "$SKIP_TOOLCHAIN"; then
-    log "Prebuilding toolchain if needed"
-    [ -d "staging_dir" ] && [ -n "$(ls -A staging_dir 2>/dev/null)" ] && echo "Toolchain/cache directories already exist" || make toolchain/install -j"$THREADS" || true
+    log "Validating prebuilt toolchain cache"
+    if [ -d "staging_dir" ] && [ -n "$(ls -A staging_dir 2>/dev/null)" ] && toolchain_cache_valid; then
+      echo "Toolchain/cache directories look usable"
+    else
+      log "Toolchain cache is missing runtime linker files; forcing toolchain rebuild"
+      rm -rf staging_dir/toolchain-* build_dir/toolchain-* 2>/dev/null || true
+      make toolchain/install -j"$THREADS"
+    fi
   fi
 }
 
