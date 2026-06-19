@@ -9,7 +9,17 @@ SOURCE_DIR="${SOURCE_DIR:-immortalwrt}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
 THREADS="${THREADS:-$(nproc 2>/dev/null || echo 2)}"
 GOPROXY="${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}"
+GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+DOWNLOAD_MIRROR="${DOWNLOAD_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/openwrt/sources;https://mirrors.ustc.edu.cn/openwrt/sources;https://mirrors.bfsu.edu.cn/openwrt/sources}"
+GITHUB_PROXY_PREFIXES="${GITHUB_PROXY_PREFIXES:-https://ghfast.top/ https://gh-proxy.com/ https://gh.llkk.cc/}"
 export GOPROXY
+export GOSUMDB
+export DOWNLOAD_MIRROR
+
+HOMEPROXY_REPO_URL="${HOMEPROXY_REPO_URL:-https://github.com/immortalwrt/homeproxy}"
+HOMEPROXY_REPO_BRANCH="${HOMEPROXY_REPO_BRANCH:-master}"
+HOMEPROXY_FALLBACK_REPO_URL="${HOMEPROXY_FALLBACK_REPO_URL:-https://github.com/VIKINGYFY/homeproxy}"
+HOMEPROXY_FALLBACK_REPO_BRANCH="${HOMEPROXY_FALLBACK_REPO_BRANCH:-main}"
 
 ENABLE_ADGUARDHOME="${ENABLE_ADGUARDHOME:-false}"
 ENABLE_OPENCLASH="${ENABLE_OPENCLASH:-false}"
@@ -89,6 +99,60 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
+github_url_candidates() {
+  local url="$1"
+  printf '%s\n' "$url"
+  case "$url" in
+    https://github.com/*|https://raw.githubusercontent.com/*)
+      local prefix
+      for prefix in $GITHUB_PROXY_PREFIXES; do
+        [ -n "$prefix" ] || continue
+        printf '%s%s\n' "${prefix%/}/" "$url"
+      done
+      ;;
+  esac
+}
+
+git_clone_retry() {
+  local url="$1"
+  local branch="$2"
+  local dest="$3"
+  local depth="${4:-1}"
+  local candidate args=()
+
+  [ -n "$branch" ] && args+=(-b "$branch")
+  [ "$depth" != "0" ] && args+=(--depth="$depth")
+
+  rm -rf "$dest"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    log "Cloning $(basename "$url") from $candidate"
+    if git clone "${args[@]}" "$candidate" "$dest"; then
+      return 0
+    fi
+    rm -rf "$dest"
+  done < <(github_url_candidates "$url")
+
+  return 1
+}
+
+curl_fetch_retry() {
+  local url="$1"
+  local output="$2"
+  local candidate
+
+  rm -f "$output"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if curl -fsSL "$candidate" -o "$output"; then
+      return 0
+    fi
+    rm -f "$output"
+  done < <(github_url_candidates "$url")
+
+  return 1
+}
+
 install_deps() {
   log "Installing Ubuntu/Debian dependencies"
   command -v apt-get >/dev/null 2>&1 || die "--install-deps currently supports apt-get based systems only"
@@ -134,6 +198,9 @@ MWAN=${ENABLE_MWAN}
 HomeProxy=${ENABLE_HOMEPROXY}
 Adbyby Plus=${ENABLE_ADBYBY_PLUS}
 Original Modem=${ENABLE_ORIGINAL_MODEM}
+GOPROXY=${GOPROXY}
+GOSUMDB=${GOSUMDB}
+DOWNLOAD_MIRROR=${DOWNLOAD_MIRROR}
 EOF
 }
 
@@ -143,7 +210,7 @@ prepare_source() {
 
   if [ ! -d "$SOURCE_DIR/.git" ]; then
     rm -rf "$SOURCE_DIR"
-    git clone -b "$REPO_BRANCH" --single-branch --depth=1 "$REPO_URL" "$SOURCE_DIR"
+    git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$SOURCE_DIR" 1
   else
     cd "$SOURCE_DIR"
     local current_branch
@@ -151,7 +218,7 @@ prepare_source() {
     if [ "$current_branch" != "$REPO_BRANCH" ]; then
       cd "$ROOT_DIR"
       rm -rf "$SOURCE_DIR"
-      git clone -b "$REPO_BRANCH" --single-branch --depth=1 "$REPO_URL" "$SOURCE_DIR"
+      git_clone_retry "$REPO_URL" "$REPO_BRANCH" "$SOURCE_DIR" 1
     else
       if git fetch origin "$REPO_BRANCH"; then
         git reset --hard FETCH_HEAD
@@ -185,12 +252,16 @@ prepare_feeds() {
   if is_true "$SKIP_FEEDS_UPDATE"; then
     log "Skipping ./scripts/feeds update -a (per --skip-feeds-update)"
   else
-    ./scripts/feeds update -a || true
+    ./scripts/feeds update -a || die "feeds update failed; refusing to continue with incomplete feeds"
   fi
   if is_true "$ENABLE_MOSDNS" || is_true "$ENABLE_NIKKI"; then
     install_golang_feed
   fi
-  ./scripts/feeds install -a -f || true
+  if is_true "$ENABLE_NIKKI" && [ ! -d "feeds/nikki" ]; then
+    mkdir -p feeds
+    git_clone_retry "https://github.com/nikkinikki-org/OpenWrt-nikki.git" "main" "feeds/nikki" 1 || die "Unable to fetch Nikki feed"
+  fi
+  ./scripts/feeds install -a -f || log "WARNING: feeds install -a reported errors; selected packages will be installed explicitly"
 }
 
 fix_qmi_driver() {
@@ -239,6 +310,21 @@ patch_mtwifi_apcli_bssid_budget() {
   fi
 }
 
+verify_mtwifi_patch() {
+  local cfg_file="package/mtk/applications/mtwifi-cfg/files/mtwifi-cfg/mtwifi_cfg"
+  local netifd_file="package/mtk/applications/mtwifi-cfg/files/netifd/mtwifi.sh"
+
+  [ -f "$cfg_file" ] || die "Missing mtwifi_cfg after source update"
+  [ -f "$netifd_file" ] || die "Missing netifd mtwifi.sh after source update"
+
+  grep -q 'function vif_is_enabled' "$cfg_file" || die "MTK WiFi patch verification failed: vif_is_enabled missing"
+  grep -q 'function sorted_vif_indices' "$cfg_file" || die "MTK WiFi patch verification failed: sorted_vif_indices missing"
+  grep -q 'dats.BssidNum = effective_bssid_num' "$cfg_file" || die "MTK WiFi patch verification failed: dynamic BssidNum missing"
+  grep -q 'resolve_apcli_macaddr' "$cfg_file" || die "MTK WiFi patch verification failed: APCLI MAC resolver missing"
+  awk '/mtwifi_vif_ap_set_data\(\)/,/^}/ { if ($0 ~ /disabled/ && $0 ~ /return/) found=1 } END { exit(found ? 0 : 1) }' "$netifd_file" || die "MTK WiFi patch verification failed: AP set_data disabled guard missing"
+  awk '/mtwifi_vif_sta_set_data\(\)/,/^}/ { if ($0 ~ /disabled/ && $0 ~ /return/) found=1 } END { exit(found ? 0 : 1) }' "$netifd_file" || die "MTK WiFi patch verification failed: STA set_data disabled guard missing"
+}
+
 install_golang_feed() {
   local golang_dir="feeds/packages/lang/golang"
   golang_feed_is_go124() {
@@ -268,10 +354,11 @@ install_golang_feed() {
     local tmp_dir
     tmp_dir="$(mktemp -d)"
     log "Installing Go 1.24 feed for Go packages"
-    if ! git clone --depth=1 https://github.com/sbwml/packages_lang_golang -b 24.x "$tmp_dir"; then
+    if ! git_clone_retry https://github.com/sbwml/packages_lang_golang 24.x "$tmp_dir" 1; then
       rm -rf "$tmp_dir"
       die "Unable to clone packages_lang_golang 24.x"
     fi
+    mkdir -p "$(dirname "$golang_dir")"
     rm -rf "$golang_dir"
     mv "$tmp_dir" "$golang_dir"
   fi
@@ -291,6 +378,7 @@ apply_package_fixes() {
   cd "$ROOT_DIR/$SOURCE_DIR"
 
   patch_mtwifi_apcli_bssid_budget
+  verify_mtwifi_patch
 
   local ebtables_makefile="package/network/utils/ebtables/Makefile"
   if [ -f "$ebtables_makefile" ] && grep -qE 'git(://|s://git\.)netfilter\.org/ebtables' "$ebtables_makefile"; then
@@ -314,15 +402,27 @@ apply_package_fixes() {
   fi
 
   if is_true "$ENABLE_ADGUARDHOME"; then
-    [ ! -d "package/luci-app-adguardhome" ] && git clone --depth=1 https://github.com/kongfl888/luci-app-adguardhome.git package/luci-app-adguardhome
+    [ ! -d "package/luci-app-adguardhome" ] && git_clone_retry https://github.com/kongfl888/luci-app-adguardhome.git "" package/luci-app-adguardhome 1
     local agh_script="package/luci-app-adguardhome/root/usr/share/AdGuardHome/links.sh"
     [ -f "$agh_script" ] && sed -i 's|mv /usr/bin/AdGuardHome/AdGuardHome|rm -rf /usr/bin/AdGuardHome 2>/dev/null; mkdir -p /usr/bin/AdGuardHome; mv /tmp/AdGuardHomeupdate/AdGuardHome_linux_*/AdGuardHome|g' "$agh_script" || true
+  fi
+
+  if is_true "$ENABLE_OPENCLASH"; then
+    if [ ! -d "package/luci-app-openclash" ]; then
+      rm -rf /tmp/openclash
+      git_clone_retry https://github.com/vernesong/OpenClash.git master /tmp/openclash 1
+      [ -d "/tmp/openclash/luci-app-openclash" ] || die "OpenClash repository layout changed"
+      cp -r /tmp/openclash/luci-app-openclash package/luci-app-openclash
+      rm -rf /tmp/openclash
+    fi
+    [ -f "package/luci-app-openclash/Makefile" ] || die "luci-app-openclash repository layout changed"
   fi
 
   if is_true "$ENABLE_ADBYBY_PLUS"; then
     if [ ! -d "package/luci-app-adbyby-plus" ]; then
       rm -rf /tmp/adbyby-plus-lite
-      git clone --depth=1 --recurse-submodules https://github.com/kongfl888/luci-app-adbyby-plus-lite.git /tmp/adbyby-plus-lite
+      git_clone_retry https://github.com/kongfl888/luci-app-adbyby-plus-lite.git "" /tmp/adbyby-plus-lite 1
+      (cd /tmp/adbyby-plus-lite && git submodule update --init --recursive) || true
       [ -d "/tmp/adbyby-plus-lite/luci-app-adbyby-plus" ] || die "Adbyby Plus Lite repository layout changed"
       cp -r /tmp/adbyby-plus-lite/luci-app-adbyby-plus package/luci-app-adbyby-plus
       rm -rf /tmp/adbyby-plus-lite
@@ -331,10 +431,29 @@ apply_package_fixes() {
 
   if is_true "$ENABLE_MOSDNS"; then
     install_golang_feed
-    rm -rf feeds/packages/net/v2ray-geodata
-    [ ! -d "package/mosdns" ] && git clone https://github.com/sbwml/luci-app-mosdns -b v5 package/mosdns
+    rm -rf \
+      feeds/packages/net/mosdns \
+      feeds/packages/net/v2ray-geodata \
+      package/feeds/packages/mosdns \
+      package/feeds/packages/v2ray-geodata \
+      package/feeds/packages/v2ray-geoip \
+      package/feeds/packages/v2ray-geosite 2>/dev/null || true
+    [ ! -d "package/mosdns" ] && git_clone_retry https://github.com/sbwml/luci-app-mosdns v5 package/mosdns 1
     patch_v2dat_go124
-    [ ! -d "package/v2ray-geodata" ] && git clone https://github.com/sbwml/v2ray-geodata package/v2ray-geodata
+    [ ! -d "package/v2ray-geodata" ] && git_clone_retry https://github.com/sbwml/v2ray-geodata "" package/v2ray-geodata 1
+    local geodata_makefile="package/v2ray-geodata/Makefile"
+    if [ -f "$geodata_makefile" ]; then
+      sed -i 's/curl -L /curl -L --retry 5 --retry-delay 2 --connect-timeout 20 /g' "$geodata_makefile"
+    fi
+  fi
+
+  if is_true "$ENABLE_HOMEPROXY"; then
+    if [ ! -d "package/luci-app-homeproxy" ]; then
+      git_clone_retry "$HOMEPROXY_REPO_URL" "$HOMEPROXY_REPO_BRANCH" package/luci-app-homeproxy 1 || \
+        git_clone_retry "$HOMEPROXY_FALLBACK_REPO_URL" "$HOMEPROXY_FALLBACK_REPO_BRANCH" package/luci-app-homeproxy 1 || \
+        die "Unable to fetch luci-app-homeproxy"
+    fi
+    [ -f "package/luci-app-homeproxy/Makefile" ] || die "luci-app-homeproxy repository layout changed"
   fi
 
   rm -rf package/feeds/packages/{exim,onionshare-cli,python-zope-event,python-zope-interface,python-gevent,python-twisted} 2>/dev/null || true
@@ -357,6 +476,57 @@ apply_package_fixes() {
   fi
 
   [ -f "package/mtk/drivers/mt_hwifi/Makefile" ] && sed -i 's/+kmod-mt_wifi_osal//g' "package/mtk/drivers/mt_hwifi/Makefile" || true
+}
+
+feed_install_pkg() {
+  local pkg="$1"
+  ./scripts/feeds install -f "$pkg" || die "Unable to install feed package: $pkg"
+}
+
+require_package_file() {
+  local feature_name="$1"
+  local file_path="$2"
+  [ -f "$file_path" ] || die "$feature_name required package file is missing: $file_path"
+}
+
+install_selected_packages() {
+  log "Installing selected feed packages"
+  cd "$ROOT_DIR/$SOURCE_DIR"
+
+  if is_true "$ENABLE_NIKKI"; then
+    feed_install_pkg nikki
+    feed_install_pkg luci-app-nikki
+    feed_install_pkg mihomo-meta
+  fi
+
+  if is_true "$ENABLE_UPNP"; then
+    feed_install_pkg luci-app-upnp
+  fi
+
+  if is_true "$ENABLE_VLMCSD"; then
+    feed_install_pkg vlmcsd
+    feed_install_pkg luci-app-vlmcsd
+  fi
+
+  if is_true "$ENABLE_MWAN"; then
+    feed_install_pkg mwan3
+    feed_install_pkg luci-app-mwan3
+  fi
+
+  if is_true "$ENABLE_HOMEPROXY"; then
+    feed_install_pkg sing-box
+    require_package_file "HomeProxy" "package/luci-app-homeproxy/Makefile"
+    require_package_file "HomeProxy sing-box" "package/feeds/packages/sing-box/Makefile"
+  fi
+
+  if is_true "$ENABLE_MOSDNS"; then
+    require_package_file "MosDNS LuCI" "package/mosdns/luci-app-mosdns/Makefile"
+    require_package_file "MosDNS core" "package/mosdns/mosdns/Makefile"
+    require_package_file "MosDNS v2dat" "package/mosdns/v2dat/Makefile"
+    require_package_file "MosDNS v2ray geodata" "package/v2ray-geodata/Makefile"
+  fi
+
+  rm -rf tmp/.config* tmp/.packageinfo tmp/info/.packageinfo* 2>/dev/null || true
 }
 
 config_enable() {
@@ -386,7 +556,7 @@ configure_build() {
     die "ENABLE_ORIGINAL_MODEM conflicts with QModem options"
   fi
 
-  curl -fsSL "$CONFIG_URL" -o base.config || {
+  curl_fetch_retry "$CONFIG_URL" base.config || {
     [ -f "defconfig/mt7987_mt7992.config" ] && cp defconfig/mt7987_mt7992.config base.config
   }
   [ -f base.config ] || die "Unable to fetch or locate base config"
@@ -421,9 +591,33 @@ EOF
   is_true "$ENABLE_OPENCLASH" && echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config || disabled_pkgs+=("luci-app-openclash")
   is_true "$ENABLE_UPNP" && echo "CONFIG_PACKAGE_luci-app-upnp=y" >> .config || disabled_pkgs+=("luci-app-upnp")
   is_true "$ENABLE_VLMCSD" && { echo "CONFIG_PACKAGE_luci-app-vlmcsd=y" >> .config; echo "CONFIG_PACKAGE_vlmcsd=y" >> .config; } || disabled_pkgs+=("luci-app-vlmcsd" "vlmcsd")
-  is_true "$ENABLE_MOSDNS" && echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config || disabled_pkgs+=("luci-app-mosdns")
+  if is_true "$ENABLE_MOSDNS"; then
+    cat >> .config <<'EOF'
+CONFIG_PACKAGE_luci-app-mosdns=y
+CONFIG_PACKAGE_mosdns=y
+CONFIG_PACKAGE_v2dat=y
+CONFIG_PACKAGE_v2ray-geoip=y
+CONFIG_PACKAGE_v2ray-geosite=y
+EOF
+  else
+    disabled_pkgs+=("luci-app-mosdns" "mosdns" "v2dat" "v2ray-geoip" "v2ray-geosite")
+  fi
   is_true "$ENABLE_MWAN" && echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config || disabled_pkgs+=("luci-app-mwan3")
-  is_true "$ENABLE_HOMEPROXY" && echo "CONFIG_PACKAGE_luci-app-homeproxy=y" >> .config || disabled_pkgs+=("luci-app-homeproxy")
+  if is_true "$ENABLE_HOMEPROXY"; then
+    cat >> .config <<'EOF'
+CONFIG_PACKAGE_luci-app-homeproxy=y
+CONFIG_PACKAGE_sing-box=y
+CONFIG_PACKAGE_firewall4=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-inet-diag=y
+CONFIG_PACKAGE_kmod-netlink-diag=y
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_ucode-mod-digest=y
+CONFIG_PACKAGE_ca-bundle=y
+EOF
+  else
+    disabled_pkgs+=("luci-app-homeproxy")
+  fi
   is_true "$ENABLE_ADBYBY_PLUS" && { echo "CONFIG_PACKAGE_luci-app-adbyby-plus=y" >> .config; echo "CONFIG_PACKAGE_luci-i18n-adbyby-plus-zh-cn=y" >> .config; echo "CONFIG_PACKAGE_ipset=y" >> .config; } || disabled_pkgs+=("luci-app-adbyby-plus" "luci-i18n-adbyby-plus-zh-cn")
 
   if is_true "$ENABLE_DOCKERMAN"; then
@@ -493,6 +687,23 @@ EOF
     config_enable PACKAGE_luci-i18n-nikki-zh-cn
   fi
 
+  if is_true "$ENABLE_MOSDNS"; then
+    config_enable PACKAGE_luci-app-mosdns
+    config_enable PACKAGE_mosdns
+    config_enable PACKAGE_v2dat
+    config_enable PACKAGE_v2ray-geoip
+    config_enable PACKAGE_v2ray-geosite
+  fi
+
+  if is_true "$ENABLE_HOMEPROXY"; then
+    config_enable PACKAGE_luci-app-homeproxy
+    config_enable PACKAGE_sing-box
+    config_enable PACKAGE_kmod-nft-tproxy
+    config_enable PACKAGE_kmod-inet-diag
+    config_enable PACKAGE_kmod-netlink-diag
+    config_enable PACKAGE_kmod-tun
+  fi
+
   if is_true "$ENABLE_VLMCSD"; then
     config_enable PACKAGE_vlmcsd
     config_enable PACKAGE_luci-app-vlmcsd
@@ -509,13 +720,22 @@ EOF
   fi
 
   verify_enabled_pkg "Nikki" "luci-app-nikki" "$ENABLE_NIKKI"
+  verify_enabled_pkg "Nikki core" "nikki" "$ENABLE_NIKKI"
+  verify_enabled_pkg "Nikki mihomo-meta" "mihomo-meta" "$ENABLE_NIKKI"
+  verify_enabled_pkg "OpenClash" "luci-app-openclash" "$ENABLE_OPENCLASH"
   verify_enabled_pkg "UPnP" "luci-app-upnp" "$ENABLE_UPNP"
   verify_enabled_pkg "VLMCSd" "luci-app-vlmcsd" "$ENABLE_VLMCSD"
   verify_enabled_pkg "MosDNS" "luci-app-mosdns" "$ENABLE_MOSDNS"
+  verify_enabled_pkg "MosDNS core" "mosdns" "$ENABLE_MOSDNS"
+  verify_enabled_pkg "MosDNS v2dat" "v2dat" "$ENABLE_MOSDNS"
+  verify_enabled_pkg "MosDNS geoip" "v2ray-geoip" "$ENABLE_MOSDNS"
+  verify_enabled_pkg "MosDNS geosite" "v2ray-geosite" "$ENABLE_MOSDNS"
   verify_enabled_pkg "DockerMan" "luci-app-dockerman" "$ENABLE_DOCKERMAN"
   verify_enabled_pkg "QModem Next" "luci-app-qmodem-next" "$ENABLE_QMODEM_NEXT"
   verify_enabled_pkg "MWAN" "luci-app-mwan3" "$ENABLE_MWAN"
   verify_enabled_pkg "HomeProxy" "luci-app-homeproxy" "$ENABLE_HOMEPROXY"
+  verify_enabled_pkg "HomeProxy sing-box" "sing-box" "$ENABLE_HOMEPROXY"
+  verify_enabled_pkg "HomeProxy nft tproxy" "kmod-nft-tproxy" "$ENABLE_HOMEPROXY"
   verify_enabled_pkg "Adbyby Plus" "luci-app-adbyby-plus" "$ENABLE_ADBYBY_PLUS"
 }
 
@@ -635,6 +855,9 @@ collect_artifacts() {
     (cd "$ARTIFACTS_DIR" && ls -lh | sed 's/^/  /')
   } > "$ARTIFACTS_DIR/MANIFEST.txt"
 
+  cp -f "$SOURCE_DIR/.config" "$ARTIFACTS_DIR/build.config"
+  grep '^CONFIG_PACKAGE_.*=y$' "$SOURCE_DIR/.config" | sort > "$ARTIFACTS_DIR/enabled-packages.txt"
+
   tar -czf artifacts.tar.gz "$ARTIFACTS_DIR"
   ls -lh "$ARTIFACTS_DIR"
   echo "Artifacts archive: $ROOT_DIR/artifacts.tar.gz"
@@ -648,6 +871,7 @@ main() {
   prepare_source
   prepare_feeds
   apply_package_fixes
+  install_selected_packages
   configure_build
   is_true "$PREPARE_ONLY" && { log "Prepare-only requested; stopping before downloads/build"; exit 0; }
   is_true "$CONFIG_ONLY" && { log "Config-only requested; stopping before downloads/build"; exit 0; }

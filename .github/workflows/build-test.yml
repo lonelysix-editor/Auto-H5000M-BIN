@@ -75,6 +75,24 @@ on:
         required: false
         default: true
         type: boolean
+      run_config_coverage:
+        description: '先运行覆盖性配置测试'
+        required: false
+        default: false
+        type: boolean
+      coverage_profile_set:
+        description: '覆盖性配置测试范围'
+        required: false
+        default: quick
+        type: choice
+        options:
+          - quick
+          - full
+      full_build_smoke_profile:
+        description: '额外完整编译冒烟 profile（留空则不跑）'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -90,6 +108,9 @@ env:
   SOURCE_DIR: immortalwrt
   TZ: Asia/Shanghai
   GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.google.cn
+  DOWNLOAD_MIRROR: "https://mirrors.tuna.tsinghua.edu.cn/openwrt/sources;https://mirrors.ustc.edu.cn/openwrt/sources;https://mirrors.bfsu.edu.cn/openwrt/sources"
+  GITHUB_PROXY_PREFIXES: "https://ghfast.top/ https://gh-proxy.com/ https://gh.llkk.cc/"
 
 jobs:
   build:
@@ -123,6 +144,9 @@ jobs:
             [enable_adbyby_plus]=false
             [enable_original_modem]=false
             [publish_release]=true
+            [run_config_coverage]=false
+            [coverage_profile_set]=quick
+            [full_build_smoke_profile]=''
           )
 
           declare -A manual=(
@@ -140,6 +164,9 @@ jobs:
             [enable_adbyby_plus]='${{ github.event.inputs.enable_adbyby_plus }}'
             [enable_original_modem]='${{ github.event.inputs.enable_original_modem }}'
             [publish_release]='${{ github.event.inputs.publish_release }}'
+            [run_config_coverage]='${{ github.event.inputs.run_config_coverage }}'
+            [coverage_profile_set]='${{ github.event.inputs.coverage_profile_set }}'
+            [full_build_smoke_profile]='${{ github.event.inputs.full_build_smoke_profile }}'
           )
 
           for k in "${!scheduled_defaults[@]}"; do
@@ -206,6 +233,20 @@ jobs:
           key: ${{ runner.os }}-build-${{ env.REPO_BRANCH }}-${{ hashFiles('feeds.conf.default', 'h5000m.extra.config', 'patches/**', 'scripts/local-build.sh') }}
           restore-keys: |
             ${{ runner.os }}-build-${{ env.REPO_BRANCH }}-
+
+      - name: 覆盖性配置测试
+        if: steps.features.outputs.run_config_coverage == 'true'
+        shell: bash
+        env:
+          PROFILE_SET: ${{ steps.features.outputs.coverage_profile_set }}
+          FULL_BUILD_PROFILE: ${{ steps.features.outputs.full_build_smoke_profile }}
+          SOURCE_DIR_ROOT: immortalwrt-coverage
+          ARTIFACTS_DIR_ROOT: artifacts-coverage
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:$PATH"
+          export THREADS="$(nproc)"
+          bash scripts/coverage-test.sh "$PROFILE_SET"
 
       - name: 编译固件
         shell: bash
